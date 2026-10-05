@@ -1,3 +1,4 @@
+from bisect import bisect_right
 from collections.abc import Container, Iterable, Sized, Hashable
 from functools import reduce
 from typing import Generic, TypeVar
@@ -8,6 +9,46 @@ T_co = TypeVar('T_co', covariant=True)
 
 def _add_to_counters(counters, element):
     return counters.set(element, counters.get(element, 0) + 1)
+
+
+def _ordered_elements(counts, key):
+    """
+    Return the distinct elements of counts in a deterministic order.
+
+    Elements are ordered by ``key(element)`` if a key is given, otherwise by
+    ``repr(element)``. Ties are broken by ``repr(element)`` so that the order
+    is stable even when the key maps different elements to the same value.
+    """
+    if key is None:
+        return sorted(counts, key=repr)
+    return sorted(counts, key=lambda elt: (key(elt), repr(elt)))
+
+
+def _cumulative_weights(elements, counts):
+    """
+    Return (elements_with_positive_count, cumulative_endpoints, total).
+    """
+    weighted = []
+    endpoints = []
+    total = 0
+    for elt in elements:
+        count = counts.get(elt, 0)
+        if count > 0:
+            total += count
+            weighted.append(elt)
+            endpoints.append(total)
+    return weighted, endpoints, total
+
+
+def _pick_weighted(weighted, endpoints, total, rand):
+    """
+    Pick one element proportional to its weight using rand.randrange(total).
+
+    All arithmetic is done on integers so weights of any magnitude (including
+    counts above 2**53) are handled exactly.
+    """
+    r = rand.randrange(total)
+    return weighted[bisect_right(endpoints, r)]
 
 
 class PBag(Generic[T_co]):
@@ -96,6 +137,89 @@ class PBag(Generic[T_co]):
         2
         """
         return self._counts.get(element, 0)
+
+    def sample_with_replacement(self, k, rand, key=None):
+        """
+        Return a list of ``k`` elements sampled from this bag with
+        replacement, where each element is selected with probability
+        proportional to its count. The bag is not modified and no
+        intermediate structure proportional to the total count is created,
+        so bags with very large counts are sampled in O(distinct elements).
+
+        ``rand`` is the random source, supplied by the caller. It may be any
+        object providing ``randrange(n)``, e.g. an instance of
+        ``random.Random``. Sampling uses integer weights only, so counts
+        above 2**53 are handled exactly.
+
+        ``key`` is an optional function mapping each element to a sort key.
+        It fixes the order in which elements are assigned their sampling
+        intervals, making the result reproducible for a given random source.
+        Ties are broken by ``repr(element)``. If omitted, elements are
+        ordered by ``repr(element)``.
+
+        >>> import random
+        >>> s = pbag([1, 1, 2])
+        >>> s.sample_with_replacement(3, random.Random(42))
+        [2, 1, 1]
+        """
+        if k < 0:
+            raise ValueError("k must be non-negative")
+        if k == 0:
+            return []
+        elements = _ordered_elements(self._counts, key)
+        weighted, endpoints, total = _cumulative_weights(elements, self._counts)
+        if total == 0:
+            raise ValueError("Cannot sample from an empty bag")
+        return [_pick_weighted(weighted, endpoints, total, rand)
+                for _ in range(k)]
+
+    def sample_without_replacement(self, k, rand, key=None):
+        """
+        Sample ``k`` elements from this bag without replacement and return a
+        tuple ``(selected, new_bag)`` where ``selected`` is a list of the
+        sampled elements and ``new_bag`` is a new PBag with those elements
+        removed. This bag is left unchanged. Each remaining element is
+        selected with probability proportional to its current count.
+
+        If ``k`` exceeds the number of elements in the bag a ValueError is
+        raised before any sampling (and before the random source is
+        consulted). Sampling uses integer weights only, so counts above
+        2**53 are handled exactly, and no intermediate structure
+        proportional to the total count is created.
+
+        ``rand`` and ``key`` behave as in :py:meth:`sample_with_replacement`.
+
+        >>> import random
+        >>> s = pbag([1, 1, 2])
+        >>> selected, rest = s.sample_without_replacement(2, random.Random(42))
+        >>> selected
+        [2, 1]
+        >>> rest
+        pbag([1])
+        >>> s
+        pbag([1, 1, 2])
+        """
+        if k < 0:
+            raise ValueError("k must be non-negative")
+        total = len(self)
+        if k > total:
+            raise ValueError(
+                "Cannot sample {0} elements without replacement from a bag "
+                "of size {1}".format(k, total))
+        if k == 0:
+            return [], self
+        elements = _ordered_elements(self._counts, key)
+        remaining = {elt: count for elt, count in self._counts.iteritems()}
+        selected = []
+        for _ in range(k):
+            weighted, endpoints, remaining_total = _cumulative_weights(
+                elements, remaining)
+            elt = _pick_weighted(weighted, endpoints, remaining_total, rand)
+            selected.append(elt)
+            remaining[elt] -= 1
+            if remaining[elt] == 0:
+                del remaining[elt]
+        return selected, PBag(pmap(remaining))
 
     def __len__(self):
         """
@@ -267,4 +391,3 @@ def pbag(elements):
 
 
 _EMPTY_PBAG = PBag(pmap())
-
