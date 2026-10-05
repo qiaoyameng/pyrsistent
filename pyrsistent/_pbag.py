@@ -10,6 +10,31 @@ def _add_to_counters(counters, element):
     return counters.set(element, counters.get(element, 0) + 1)
 
 
+def _ordered_weighted_items(counts, key):
+    """
+    Return the (element, count) items of counts as a list, sorted by
+    key(element) if a key is given. The sort is stable, so elements with
+    equal keys keep their relative order from the underlying map iteration.
+    """
+    items = list(counts.iteritems())
+    if key is not None:
+        items.sort(key=lambda item: key(item[0]))
+    return items
+
+
+def _weighted_pick(items, roll):
+    """
+    Return the element whose half-open cumulative weight interval contains
+    roll, where 0 <= roll < sum of all counts in items.
+    """
+    cumulative = 0
+    for element, count in items:
+        cumulative += count
+        if roll < cumulative:
+            return element
+    raise ValueError('roll {0} out of range'.format(roll))
+
+
 class PBag(Generic[T_co]):
     """
     A persistent bag/multiset type.
@@ -96,6 +121,98 @@ class PBag(Generic[T_co]):
         2
         """
         return self._counts.get(element, 0)
+
+    def sample_with_replacement(self, k, rand, key=None):
+        """
+        Draw k elements at random, with probability proportional to each
+        element's count, without modifying the bag.
+
+        Returns a list of the k drawn elements. The bag is never expanded
+        into a list of elements, so arbitrarily large counts are supported
+        with cost proportional to the number of distinct elements only.
+
+        Weights are the exact integer counts (no float conversion), so
+        counts beyond 2**53 are still handled precisely.
+
+        rand supplies the randomness and must provide randrange(n)
+        returning an integer in range(n), e.g. an instance of
+        random.Random. Pass key, a function mapping elements to sortable
+        values, to get a reproducible element ordering; ties are broken
+        stably by the bag's internal iteration order.
+
+        >>> import random
+        >>> bag = pbag(['a', 'b', 'b'])
+        >>> bag.sample_with_replacement(3, random.Random(0), key=str)
+        ['b', 'b', 'a']
+        >>> bag
+        pbag(['a', 'b', 'b'])
+        """
+        if k < 0:
+            raise ValueError('Cannot draw a negative number of elements: {0}'.format(k))
+        items = _ordered_weighted_items(self._counts, key)
+        if k and not items:
+            raise ValueError('Cannot draw {0} elements from an empty bag'.format(k))
+        total = sum(count for _, count in items)
+        selected = []
+        for _ in range(k):
+            selected.append(_weighted_pick(items, rand.randrange(total)))
+        return selected
+
+    def sample_without_replacement(self, k, rand, key=None):
+        """
+        Draw k distinct occurrences at random, with probability
+        proportional to the remaining counts at each draw.
+
+        Returns a (selected, new_bag) pair where selected is the list of
+        drawn elements and new_bag is a new PBag with the drawn
+        occurrences removed. This bag is left unchanged.
+
+        If k exceeds the number of elements in the bag a ValueError is
+        raised before any drawing takes place.
+
+        rand and key behave as in :py:meth:`sample_with_replacement`.
+
+        >>> import random
+        >>> bag = pbag(['a', 'b', 'b'])
+        >>> selected, new_bag = bag.sample_without_replacement(2, random.Random(0), key=str)
+        >>> selected
+        ['b', 'b']
+        >>> new_bag
+        pbag(['a'])
+        >>> bag
+        pbag(['a', 'b', 'b'])
+        """
+        if k < 0:
+            raise ValueError('Cannot draw a negative number of elements: {0}'.format(k))
+        total = len(self)
+        if k > total:
+            raise ValueError('Cannot draw {0} elements from a bag of size {1}'.format(k, total))
+        if k == 0:
+            return [], self
+        items = _ordered_weighted_items(self._counts, key)
+        remaining = dict(items)
+        drawn = set()
+        selected = []
+        for draw in range(k):
+            roll = rand.randrange(total - draw)
+            cumulative = 0
+            for element, _ in items:
+                count = remaining[element]
+                if count:
+                    cumulative += count
+                    if roll < cumulative:
+                        selected.append(element)
+                        remaining[element] = count - 1
+                        drawn.add(element)
+                        break
+        evolver = self._counts.evolver()
+        for element in drawn:
+            count = remaining[element]
+            if count:
+                evolver[element] = count
+            else:
+                evolver.remove(element)
+        return selected, PBag(evolver.persistent())
 
     def __len__(self):
         """
@@ -267,4 +384,3 @@ def pbag(elements):
 
 
 _EMPTY_PBAG = PBag(pmap())
-
