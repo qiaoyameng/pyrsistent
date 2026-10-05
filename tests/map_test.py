@@ -1,8 +1,11 @@
 from collections import namedtuple
 from collections.abc import Mapping, Hashable
+import gc
 from operator import add
 import pytest
-from pyrsistent import pmap, m
+import weakref
+
+from pyrsistent import pmap, m, snapshot_diff
 import pickle
 
 
@@ -549,3 +552,187 @@ def test_pmap_removal_with_broken_classes_deriving_from_namedtuple():
     assert BrokenPerson('X') not in s
     assert BrokenItem('X') in s
     assert len(s) == 1
+
+
+class CountedValue:
+    __slots__ = ('value', 'comparisons')
+
+    def __init__(self, value):
+        self.value = value
+        self.comparisons = 0
+
+    def __eq__(self, other):
+        self.comparisons += 1
+        return isinstance(other, CountedValue) and self.value == other.value
+
+    def __hash__(self):
+        return hash(self.value)
+
+
+class SameHashKey:
+    __slots__ = ('identifier',)
+
+    def __init__(self, identifier):
+        self.identifier = identifier
+
+    def __eq__(self, other):
+        return isinstance(other, SameHashKey) and self.identifier == other.identifier
+
+    def __hash__(self):
+        return 123
+
+
+class DistinctSameHashKey:
+    __slots__ = ('identifier',)
+
+    def __init__(self, identifier):
+        self.identifier = identifier
+
+    def __eq__(self, other):
+        return self is other
+
+    def __hash__(self):
+        return 123
+
+
+def compare_counted_values(left, right):
+    return left == right
+
+
+def test_snapshot_diff_reports_added_removed_and_changed():
+    old = pmap({'a': 1, 'b': 2, 'c': 3})
+    new = pmap({'b': 20, 'c': 3, 'd': 4})
+
+    result = old.snapshot_diff(new, lambda left, right: left == right)
+
+    assert result == {
+        'added': pmap({'d': 4}),
+        'removed': pmap({'a': 1}),
+        'changed': pmap({'b': (2, 20)}),
+    }
+    assert all(isinstance(part, type(old)) for part in result.values())
+
+
+def test_snapshot_diff_skips_unchanged_shared_regions():
+    old = pmap({index: CountedValue(index) for index in range(1000)}, 4096)
+    new = old.set(500, CountedValue(-1))
+
+    result = old.snapshot_diff(new, compare_counted_values)
+
+    assert result['changed'] == pmap({500: (old[500], new[500])})
+    assert result['added'] == pmap()
+    assert result['removed'] == pmap()
+    assert old[500].comparisons == 1
+    assert all(old[index].comparisons == 0 for index in range(1000) if index != 500)
+
+
+def test_snapshot_diff_with_many_hash_collisions_is_complete():
+    keys = [SameHashKey(index) for index in range(500)]
+    removed_keys = keys[:100]
+    common_keys = keys[100:300]
+    added_keys = keys[400:]
+
+    old = pmap({key: CountedValue(index) for index, key in enumerate(keys[:400])}, 4096)
+    new = old
+    for key in removed_keys:
+        new = new.remove(key)
+    new = new.set(common_keys[0], CountedValue(-1))
+    for index, key in enumerate(added_keys):
+        new = new.set(key, CountedValue(400 + index))
+
+    result = old.snapshot_diff(new, compare_counted_values)
+
+    assert set(result['removed']) == set(removed_keys)
+    assert set(result['added']) == set(added_keys)
+    assert result['changed'] == pmap({common_keys[0]: (old[common_keys[0]], new[common_keys[0]])})
+    assert sum(value.comparisons for value in old.values()) == 300
+
+
+def test_snapshot_diff_does_not_treat_same_hash_as_key_equality():
+    old_key = DistinctSameHashKey(1)
+    new_key = DistinctSameHashKey(2)
+    old = pmap({old_key: 'old'}, 8)
+    new = pmap({new_key: 'new'}, 8)
+
+    result = old.snapshot_diff(new, lambda left, right: left == right)
+
+    assert result == {
+        'added': pmap({new_key: 'new'}),
+        'removed': pmap({old_key: 'old'}),
+        'changed': pmap(),
+    }
+
+
+def test_snapshot_diff_falls_back_across_reallocation():
+    keys = [SameHashKey(index) for index in range(13)]
+    old = pmap({key: index for index, key in enumerate(keys[:12])}, 8)
+    new = old.set(keys[12], 12)
+
+    assert len(old._buckets) != len(new._buckets)
+    result = old.snapshot_diff(new, lambda left, right: left == right)
+
+    assert result == {
+        'added': pmap({keys[12]: 12}),
+        'removed': pmap(),
+        'changed': pmap(),
+    }
+
+
+def test_snapshot_diff_compares_equal_maps_from_different_sources():
+    items = [(index, CountedValue(index)) for index in range(100)]
+    old = pmap(dict(items), 128)
+    new = pmap(reversed(items), 256)
+
+    result = old.snapshot_diff(new, compare_counted_values)
+
+    assert result == {'added': pmap(), 'removed': pmap(), 'changed': pmap()}
+    assert all(value.comparisons == 1 for value in old.values())
+
+
+def test_snapshot_diff_falls_back_to_generic_mapping():
+    old = pmap({'a': 1, 'b': 2})
+    new = {'a': 10, 'c': 3}
+
+    result = snapshot_diff(old, new, lambda left, right: left == right)
+
+    assert result == {
+        'added': pmap({'c': 3}),
+        'removed': pmap({'b': 2}),
+        'changed': pmap({'a': (1, 10)}),
+    }
+
+
+def test_snapshot_diff_uses_supplied_comparator_without_hash_shortcut():
+    class AlwaysEqualValue:
+        def __eq__(self, other):
+            return True
+
+        def __hash__(self):
+            return hash('old')
+
+    old = pmap({'a': AlwaysEqualValue()})
+    new = pmap({'a': object()})
+
+    result = old.snapshot_diff(new, lambda left, right: False)
+
+    assert set(result['changed']) == {'a'}
+
+
+def test_snapshot_diff_requires_comparator():
+    with pytest.raises(TypeError):
+        pmap().snapshot_diff(pmap())
+
+
+def test_snapshot_diff_does_not_keep_global_references():
+    old = pmap({'a': CountedValue(1)})
+    comparator = lambda left, right: left == right
+    old_reference = weakref.ref(old)
+    comparator_reference = weakref.ref(comparator)
+
+    result = snapshot_diff(old, pmap({'a': CountedValue(1)}), comparator)
+    assert result['changed'] == pmap()
+    del old, comparator
+    gc.collect()
+
+    assert old_reference() is None
+    assert comparator_reference() is None

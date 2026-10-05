@@ -391,6 +391,47 @@ class PMap(Generic[KT, VT_co]):
     def copy(self):
         return self
 
+    def snapshot_diff(self, other, value_equal):
+        """
+        Return added, removed and changed entries between two snapshots.
+
+        ``value_equal`` is called as ``value_equal(old_value, new_value)`` for
+        keys present in both maps. Entries in unchanged, shared parts of the
+        persistent bucket structure are not inspected.
+
+        >>> m1 = m(a=1, b=2)
+        >>> m2 = m(a=1, b=3, c=4)
+        >>> m1.snapshot_diff(m2, lambda left, right: left == right) == {
+        ...     'added': {'c': 4},
+        ...     'removed': {},
+        ...     'changed': {'b': (2, 3)},
+        ... }
+        True
+        """
+        if not isinstance(other, Mapping):
+            raise TypeError('snapshot_diff requires a Mapping')
+        if not callable(value_equal):
+            raise TypeError('value_equal must be callable')
+
+        added = {}
+        removed = {}
+        changed = {}
+
+        bucket_pairs = _matching_bucket_pairs(self._buckets, other._buckets) if isinstance(other, PMap) else None
+        if bucket_pairs is None:
+            _diff_mapping_contents(self, other, value_equal, added, removed, changed)
+        else:
+            for _, old_bucket, new_bucket in bucket_pairs:
+                _diff_buckets(old_bucket, new_bucket, value_equal, added, removed, changed)
+
+        return {
+            'added': pmap(added),
+            'removed': pmap(removed),
+            'changed': pmap(changed),
+        }
+
+    diff = snapshot_diff
+
     class _Evolver(object):
         __slots__ = ('_buckets_evolver', '_size', '_original_pmap')
 
@@ -520,6 +561,65 @@ class PMap(Generic[KT, VT_co]):
 
 Mapping.register(PMap)
 Hashable.register(PMap)
+
+
+def _matching_bucket_pairs(old_buckets, new_buckets):
+    if old_buckets is new_buckets:
+        return ()
+
+    if len(old_buckets) != len(new_buckets):
+        return None
+
+    pairs = []
+    for index, (old_bucket, new_bucket) in enumerate(zip(old_buckets, new_buckets)):
+        if old_bucket is not new_bucket:
+            pairs.append((index, old_bucket, new_bucket))
+
+    return pairs
+
+
+def _diff_buckets(old_bucket, new_bucket, value_equal, added, removed, changed):
+    if old_bucket is new_bucket:
+        return
+
+    old_entries = dict(old_bucket or ())
+    new_entries = dict(new_bucket or ())
+
+    for key, new_value in new_entries.items():
+        try:
+            old_value = old_entries.pop(key)
+        except KeyError:
+            added[key] = new_value
+        else:
+            if not value_equal(old_value, new_value):
+                changed[key] = (old_value, new_value)
+
+    removed.update(old_entries)
+
+
+def _diff_mapping_contents(old, new, value_equal, added, removed, changed):
+    missing = object()
+
+    for key, old_value in old.items():
+        new_value = new.get(key, missing)
+        if new_value is missing:
+            removed[key] = old_value
+        elif not value_equal(old_value, new_value):
+            changed[key] = (old_value, new_value)
+
+    for key, new_value in new.items():
+        if key not in old:
+            added[key] = new_value
+
+
+def snapshot_diff(old, new, value_equal):
+    """
+    Return added, removed and changed entries from ``old`` to ``new``.
+
+    See :py:meth:`PMap.snapshot_diff` for result shape and comparison
+    semantics.
+    """
+    return old.snapshot_diff(new, value_equal)
 
 
 def _turbo_mapping(initial, pre_size):

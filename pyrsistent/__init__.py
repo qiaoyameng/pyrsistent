@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from pyrsistent._pmap import pmap, m, PMap
+from pyrsistent._pmap import pmap, m, PMap, snapshot_diff
 
 from pyrsistent._pvector import pvector, v, PVector
 
@@ -32,7 +32,7 @@ from pyrsistent._transformations import inc, discard, rex, ny
 from pyrsistent._toolz import get_in
 
 
-__all__ = ('pmap', 'm', 'PMap',
+__all__ = ('pmap', 'm', 'PMap', 'snapshot_diff',
            'pvector', 'v', 'PVector',
            'pset', 's', 'PSet',
            'pbag', 'b', 'PBag',
