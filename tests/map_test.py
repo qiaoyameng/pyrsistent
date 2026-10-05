@@ -2,7 +2,7 @@ from collections import namedtuple
 from collections.abc import Mapping, Hashable
 from operator import add
 import pytest
-from pyrsistent import pmap, m
+from pyrsistent import pmap, m, PMapDiff
 import pickle
 
 
@@ -549,3 +549,172 @@ def test_pmap_removal_with_broken_classes_deriving_from_namedtuple():
     assert BrokenPerson('X') not in s
     assert BrokenItem('X') in s
     assert len(s) == 1
+
+
+class CountedValue:
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        CountedValue.comparisons += 1
+        return isinstance(other, CountedValue) and self.value == other.value
+
+    def __hash__(self):
+        return hash(self.value)
+
+
+class CollidingKey:
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, CollidingKey) and self.value == other.value
+
+    def __hash__(self):
+        return 1
+
+
+class SameHashValue:
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, SameHashValue) and self.value == other.value
+
+    def __hash__(self):
+        return 1
+
+
+def test_diff_reports_added_removed_and_changed_entries():
+    old = pmap({'unchanged': 1, 'changed': 2, 'removed': 3})
+    new = pmap({'unchanged': 1, 'changed': 4, 'added': 5})
+
+    diff = old.diff(new, lambda old_value, new_value: old_value == new_value)
+
+    assert diff == PMapDiff(
+        pmap({'added': 5}),
+        pmap({'removed': 3}),
+        pmap({'changed': (2, 4)}),
+    )
+
+
+def test_diff_uses_supplied_comparator_and_skips_shared_regions():
+    CountedValue.comparisons = 0
+    old = pmap({key: CountedValue(key) for key in range(1000)}, pre_size=2048)
+    new = old.set(500, CountedValue(1500))
+
+    diff = old.diff(new, lambda old_value, new_value: old_value == new_value)
+    comparisons = CountedValue.comparisons
+
+    assert diff.added == pmap()
+    assert diff.removed == pmap()
+    assert diff.changed == pmap({500: (old[500], new[500])})
+    assert comparisons == 1
+
+
+def test_diff_skips_shared_bucket_without_invoking_comparator():
+    CountedValue.comparisons = 0
+    old = pmap({'a': CountedValue(1), 'b': CountedValue(2)}, pre_size=8)
+    new = old.set('c', CountedValue(3))
+
+    changed_buckets = sum(
+        old_bucket is not new_bucket
+        for old_bucket, new_bucket in zip(old._buckets, new._buckets)
+    )
+    diff = old.diff(new, lambda old_value, new_value: old_value == new_value)
+    comparisons = CountedValue.comparisons
+
+    assert changed_buckets == 1
+    assert diff.added == pmap({'c': new['c']})
+    assert comparisons == 0
+
+
+def test_diff_skips_unchanged_items_in_shared_collision_bucket():
+    CountedValue.comparisons = 0
+    keys = [CollidingKey(index) for index in range(200)]
+    old = pmap({key: CountedValue(index) for index, key in enumerate(keys)}, pre_size=8)
+    new = old.set(keys[10], CountedValue(250))
+
+    diff = old.diff(new, lambda old_value, new_value: old_value == new_value)
+    comparisons = CountedValue.comparisons
+
+    assert len(diff.changed) == 1
+    assert comparisons == 1
+
+
+def test_diff_handles_keys_with_same_hash():
+    keys = [CollidingKey(index) for index in range(200)]
+    old = pmap({keys[index]: index for index in range(150)}, pre_size=8)
+    new = old.remove(keys[1]).set(keys[2], 250).set(CollidingKey(300), 300)
+
+    diff = old.diff(new, lambda old_value, new_value: old_value == new_value)
+
+    assert diff.removed == pmap({keys[1]: 1})
+    assert diff.changed == pmap({keys[2]: (2, 250)})
+    assert diff.added[CollidingKey(300)] == 300
+    assert len(diff.added) + len(diff.removed) + len(diff.changed) == 3
+
+
+def test_diff_falls_back_to_content_when_bucket_layout_changes():
+    old = pmap({key: key for key in range(20)}, pre_size=32)
+    new = old
+    for key in range(20, 100):
+        new = new.set(key, key)
+
+    assert len(old._buckets) != len(new._buckets)
+    diff = old.diff(new, lambda old_value, new_value: old_value == new_value)
+
+    assert diff.removed == pmap()
+    assert diff.changed == pmap()
+    assert diff.added == pmap({key: key for key in range(20, 100)})
+
+
+def test_diff_handles_equal_maps_from_different_construction_sources():
+    items = [(key, key) for key in range(50)]
+    old = pmap(items, pre_size=100)
+    new = pmap(reversed(items), pre_size=100)
+
+    assert old == new
+    assert old._buckets is not new._buckets
+
+    diff = old.diff(new, lambda old_value, new_value: old_value == new_value)
+
+    assert diff == PMapDiff(pmap(), pmap(), pmap())
+
+
+def test_diff_does_not_use_value_hash_as_equality():
+    old = pmap({'key': SameHashValue(1)})
+    new = pmap({'key': SameHashValue(2)})
+
+    assert hash(old['key']) == hash(new['key'])
+    diff = old.diff(new, lambda old_value, new_value: old_value == new_value)
+
+    assert diff.changed == pmap({'key': (old['key'], new['key'])})
+
+
+def test_diff_does_not_cache_arguments_in_global_state():
+    import gc
+    import weakref
+
+    old = pmap({'key': 1})
+    new = pmap({'key': 2})
+    compare = lambda old_value, new_value: old_value == new_value
+    old_ref = weakref.ref(old)
+    new_ref = weakref.ref(new)
+    compare_ref = weakref.ref(compare)
+
+    old.diff(new, compare)
+    del old, new, compare
+    gc.collect()
+
+    assert old_ref() is None
+    assert new_ref() is None
+    assert compare_ref() is None
+
+
+def test_diff_validates_arguments():
+    with pytest.raises(TypeError):
+        m(a=1).diff(m(a=1), None)
+
+    with pytest.raises(TypeError):
+        m(a=1).diff([], lambda old_value, new_value: old_value == new_value)

@@ -32,6 +32,7 @@ from pyrsistent.typing import PBag as PBag
 from pyrsistent.typing import PDeque as PDeque
 from pyrsistent.typing import PList as PList
 from pyrsistent.typing import PMap as PMap
+from pyrsistent.typing import PMapDiff as PMapDiff
 from pyrsistent.typing import PMapEvolver as PMapEvolver
 from pyrsistent.typing import PSet as PSet
 from pyrsistent.typing import PSetEvolver as PSetEvolver

@@ -1,3 +1,4 @@
+from collections import namedtuple
 from collections.abc import Mapping, Hashable
 from itertools import chain
 from typing import Generic, TypeVar
@@ -7,6 +8,80 @@ from pyrsistent._transformations import transform
 
 KT = TypeVar('KT')
 VT_co = TypeVar('VT_co', covariant=True)
+
+
+class PMapDiff(namedtuple('PMapDiff', ('added', 'removed', 'changed'))):
+    """Result of comparing two persistent maps.
+
+    ``changed`` maps each changed key to an ``(old_value, new_value)`` tuple.
+    """
+
+
+def _empty_pmap_diff():
+    return PMapDiff(pmap(), pmap(), pmap())
+
+
+def _diff_buckets(old_buckets, new_buckets, compare):
+    added = {}
+    removed = {}
+    changed = {}
+
+    for old_bucket, new_bucket in zip(old_buckets, new_buckets):
+        if old_bucket is new_bucket:
+            continue
+
+        if old_bucket is None:
+            for key, value in new_bucket:
+                added[key] = value
+            continue
+
+        if new_bucket is None:
+            for key, value in old_bucket:
+                removed[key] = value
+            continue
+
+        old_items = {}
+        for old_pair in old_bucket:
+            old_items[old_pair[0]] = old_pair
+
+        for new_pair in new_bucket:
+            key, new_value = new_pair
+            try:
+                old_pair = old_items.pop(key)
+            except KeyError:
+                added[key] = new_value
+            else:
+                old_value = old_pair[1]
+                if old_pair is not new_pair and not compare(old_value, new_value):
+                    changed[key] = (old_value, new_value)
+
+        for key, old_pair in old_items.items():
+            removed[key] = old_pair[1]
+
+    return PMapDiff(pmap(added), pmap(removed), pmap(changed))
+
+
+def _diff_mappings(old, new, compare):
+    added = {}
+    removed = {}
+    changed = {}
+
+    for key, new_value in new.items():
+        try:
+            old_value = old[key]
+        except KeyError:
+            added[key] = new_value
+        else:
+            if not compare(old_value, new_value):
+                changed[key] = (old_value, new_value)
+
+    for key, old_value in old.items():
+        if key not in new:
+            removed[key] = old_value
+
+    return PMapDiff(pmap(added), pmap(removed), pmap(changed))
+
+
 class PMapView:
     """View type for the persistent map/dict type `PMap`.
 
@@ -351,6 +426,33 @@ class PMap(Generic[KT, VT_co]):
 
         return evolver.persistent()
 
+    def diff(self, other, compare):
+        """
+        Return the keys and values that differ from ``other``.
+
+        The supplied ``compare(old_value, new_value)`` function determines
+        whether two values for the same key are equal. Shared internal
+        structure is used to skip unchanged buckets. Maps with incompatible
+        bucket layouts are compared by content.
+        """
+        if not callable(compare):
+            raise TypeError('compare must be callable')
+
+        if not isinstance(other, Mapping):
+            raise TypeError('PMap.diff() requires a Mapping object')
+
+        if self is other:
+            return _empty_pmap_diff()
+
+        if isinstance(other, PMap):
+            if self._buckets is other._buckets:
+                return _empty_pmap_diff()
+
+            if len(self._buckets) == len(other._buckets):
+                return _diff_buckets(self._buckets, other._buckets, compare)
+
+        return _diff_mappings(self, other, compare)
+
     def __add__(self, other):
         return self.update(other)
 
@@ -414,7 +516,10 @@ class PMap(Generic[KT, VT_co]):
                     if k == key:
                         if v is not val:
                             # Use `not (k2 == k)` rather than `!=` to avoid relying on a well implemented `__ne__`, see #268.
-                            new_bucket = [(k2, v2) if not (k2 == k) else (k2, val) for k2, v2 in bucket]
+                            new_bucket = [
+                                pair if not (pair[0] == key) else (key, val)
+                                for pair in bucket
+                            ]
                             self._buckets_evolver[index] = new_bucket
 
                         return self
@@ -478,7 +583,7 @@ class PMap(Generic[KT, VT_co]):
 
             if bucket:
                 # Use `not (k == key)` rather than `!=` to avoid relying on a well implemented `__ne__`, see #268.
-                new_bucket = [(k, v) for (k, v) in bucket if not (k == key)]
+                new_bucket = [pair for pair in bucket if not (pair[0] == key)]
                 size_diff = len(bucket) - len(new_bucket)
                 if size_diff > 0:
                     self._buckets_evolver[index] = new_bucket if new_bucket else None
