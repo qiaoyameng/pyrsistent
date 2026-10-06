@@ -28,13 +28,24 @@ from pyrsistent.typing import CheckedType as CheckedType
 from pyrsistent.typing import CheckedValueTypeError as CheckedValueTypeError
 from pyrsistent.typing import InvariantException as InvariantException
 from pyrsistent.typing import PClass as PClass
+from pyrsistent.typing import PPriorityQueueError as PPriorityQueueError
+from pyrsistent.typing import PPriorityQueue as PPriorityQueue
+from pyrsistent.typing import PPriorityQueueConflictError as PPriorityQueueConflictError
+from pyrsistent.typing import PPriorityQueueEmptyError as PPriorityQueueEmptyError
+from pyrsistent.typing import PPriorityQueueHandleError as PPriorityQueueHandleError
+from pyrsistent.typing import PPriorityQueueMergeError as PPriorityQueueMergeError
 from pyrsistent.typing import PBag as PBag
 from pyrsistent.typing import PDeque as PDeque
 from pyrsistent.typing import PList as PList
 from pyrsistent.typing import PMap as PMap
 from pyrsistent.typing import PMapEvolver as PMapEvolver
+from pyrsistent.typing import PQHandle as PQHandle
+from pyrsistent.typing import PQItem as PQItem
+from pyrsistent.typing import PQMergeConflict as PQMergeConflict
+from pyrsistent.typing import PQVersion as PQVersion
 from pyrsistent.typing import PSet as PSet
 from pyrsistent.typing import PSetEvolver as PSetEvolver
+from pyrsistent.typing import PriorityMergePolicy as PriorityMergePolicy
 from pyrsistent.typing import PTypeError as PTypeError
 from pyrsistent.typing import PVector as PVector
 from pyrsistent.typing import PVectorEvolver as PVectorEvolver
@@ -132,6 +143,11 @@ def l(*elements: T) -> PList[T]: ...
 
 def pdeque(iterable: Optional[Iterable[T]] = None, maxlen: Optional[int] = None) -> PDeque[T]: ...
 def dq(*iterable: T) -> PDeque[T]: ...
+
+def ppriorityqueue(
+    iterable: Iterable[Union[T, Tuple[T, Any]]] = ()
+) -> PPriorityQueue[T]: ...
+def pq(*items: Union[T, Tuple[T, Any]]) -> PPriorityQueue[T]: ...
 
 @overload
 def optional(type: T) -> Tuple[T, Type[None]]: ...

@@ -54,6 +54,7 @@ The collection types and key features currently implemented are:
 * PBag, similar to collections.Counter
 * PList, a classic singly linked list
 * PDeque, similar to collections.deque
+* PPriorityQueue, an immutable min-queue with stable handles and branch merges
 * Immutable object type (immutable) built on the named tuple
 * freeze_ and thaw_ functions to convert between pythons standard collections and pyrsistent collections.
 * Flexible transformations_ of arbitrarily complex structures built from PMaps and PVectors.

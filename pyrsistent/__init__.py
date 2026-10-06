@@ -12,6 +12,13 @@ from pyrsistent._plist import plist, l, PList
 
 from pyrsistent._pdeque import pdeque, dq, PDeque
 
+from pyrsistent._ppriorityqueue import (
+    PQHandle, PQItem, PQMergeConflict, PQVersion, PPriorityQueue,
+    PPriorityQueueError,
+    PPriorityQueueConflictError, PPriorityQueueEmptyError,
+    PPriorityQueueHandleError, PPriorityQueueMergeError,
+    PriorityMergePolicy, ppriorityqueue, pq)
+
 from pyrsistent._checked_types import (
     CheckedPMap, CheckedPVector, CheckedPSet, InvariantException, CheckedKeyTypeError,
     CheckedValueTypeError, CheckedType, optional)
@@ -38,6 +45,11 @@ __all__ = ('pmap', 'm', 'PMap',
            'pbag', 'b', 'PBag',
            'plist', 'l', 'PList',
            'pdeque', 'dq', 'PDeque',
+           'PPriorityQueue', 'ppriorityqueue', 'pq', 'PriorityMergePolicy',
+           'PQHandle', 'PQItem', 'PQVersion', 'PQMergeConflict',
+           'PPriorityQueueError', 'PPriorityQueueConflictError',
+           'PPriorityQueueEmptyError', 'PPriorityQueueHandleError',
+           'PPriorityQueueMergeError',
            'CheckedPMap', 'CheckedPVector', 'CheckedPSet', 'InvariantException', 'CheckedKeyTypeError', 'CheckedValueTypeError', 'CheckedType', 'optional',
            'PRecord', 'field', 'pset_field', 'pmap_field', 'pvector_field',
            'PClass', 'PClassMeta',
